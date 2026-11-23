@@ -70,7 +70,7 @@ class Logger:
         log.add(
             "logs/logs.log",
             format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level}</level> | {extra[url]} |<cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
-            rotation="1 day",
+            rotation="1 day"
         )
         log.info("Starting log...")
 
@@ -566,9 +566,22 @@ class PageResult:
 class PageScanResultLLM:
     """This calss/object grabs the results of the scanner and sends it to a local LLM for analysis, and returns the result of the analysis."""
     
-    def __init__(self, pageResult: PageResult):
+    def __init__(self, pageResult: PageResult, output_path: str = "result/llm_analysis.json"):
         self.pageResult = pageResult
         self.analysis = None
+        self.output_path = output_path
+
+    def save_analysis(self, image_path: str):
+        """Saves the LLM resolt to a file."""
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "url": getattr(self.pageResult, "url", None),
+            "scerenshots": image_path,
+            "model": "ministral-3:8b",
+            "analysis": self.analysis
+        }
+        with open(self.output_path, "a") as f:
+            f.write(json.dumps(record, ensure_ascii = False) + "\n")
 
     def analyze(self, image_path: str):
         try:
@@ -578,11 +591,12 @@ class PageScanResultLLM:
             
             payload = {
                 "model": "ministral-3:8b",
-                "message": [
+                "keep-alive": "30m",
+                "messages": [
                     {
                         "role": "user",
-                        "content": f"Analyze the following page result and provide insights. Here is the screenshot.",
-                        "images": image_base64,
+                        "content": f"Analyze the following webpage cookie banner. Here is the screenshot.",
+                        "images": [image_base64],
                     }
                 ],
                 "stream": False
@@ -591,14 +605,24 @@ class PageScanResultLLM:
             url = "http://100.112.163.36:11434/api/chat"
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-            
-            with urllib.request.urlopen(req) as response:
-                result = json.loads(response.read().decode("utf-8"))
-                self.analysis = result.get("response", None)
+            try:
+                with urllib.request.urlopen(req) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                    self.analysis = result.get("message",{}).get("content", None)
+            except urllib.error.HTTPError as e:
+                error_body = e.read().decode("utf-8")
+                log.error(f"HTTPError: {e.code} - {e.reason} Body: {error_body}")
+                self.analysis = None
+                return None
+                
+            self.save_analysis(image_path)
+            log.info(f"Analysis result: {self.analysis}")
+            return self.analysis
         
         except Exception as e:
             log.exception(f"Error during analysis: {e}")
             self.analysis = None
+            return None
         
     
 
@@ -658,6 +682,30 @@ class PageScanner:
             self.startCookies = self.browser.cookies.all(True)
             # Lets find our consent notice.
             log.info("Looking for cookie notice!")
+            '''
+                To do: substitute the the consent analysis with a local LLM analysis, which will analyze the screenshot and provide insights.
+            '''
+            log.info("Analyzing page with local LLM...")
+            self.analyser = PageScanResultLLM(self)
+            analysis_text =self.analyser.analyze(self.scrn)
+            
+            self.endedAt = datetime.now()
+            self.db.modify_run(
+                self.runId,
+                {
+                    "status": "llmAnalyzed" if analysis_text else "llmFailed",
+                    "browserSize": self.windowSize,
+                    "startedAt": self.startedAt,
+                    "endedAt": self.endedAt,
+                    "lang": self.lang,
+                    "scrn": self.scrn,
+                    "analysis": analysis_text,
+                    "startCookies": self.startCookies,
+                    "endCookies": self.endCookies,
+                },
+            )
+            
+            '''
             consent = find_cookie_notice(self.browser)
             if consent:
                 self.consent = Consent(self.url, consent)
@@ -795,7 +843,7 @@ class PageScanner:
                     },
                 )
                 return None
-
+'''
             log.info("DONE WITH RUN!")
             # Done with first crawl, now if we had settings lets check them out.
             # TODO: Start looking for settings, check flowchart #3.
@@ -884,6 +932,7 @@ if __name__ == "__main__":
     db = DatabaseManager()
     url_list = []
     with open("url_list.csv", "r") as link_csv_file:
+        next(link_csv_file)  # Skip the title row
         csv_reader = csv.DictReader(link_csv_file)
 
         header = next(csv_reader)
