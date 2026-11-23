@@ -7,6 +7,8 @@ import os
 import splinter
 import csv
 import selenium
+import base64
+import urllib.request
 from langdetect import detect
 from PIL import Image
 from loguru import logger as log
@@ -561,6 +563,44 @@ class PageResult:
         """
         return None
 
+class PageScanResultLLM:
+    """This calss/object grabs the results of the scanner and sends it to a local LLM for analysis, and returns the result of the analysis."""
+    
+    def __init__(self, pageResult: PageResult):
+        self.pageResult = pageResult
+        self.analysis = None
+
+    def analyze(self, image_path: str):
+        try:
+            """Analyzes the page result using a local LLM."""
+            with open(image_path, "rb") as image_file:
+                image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
+            
+            payload = {
+                "model": "ministral-3:8b",
+                "message": [
+                    {
+                        "role": "user",
+                        "content": f"Analyze the following page result and provide insights. Here is the screenshot.",
+                        "images": image_base64,
+                    }
+                ],
+                "stream": False
+            }
+            
+            url = "http://100.112.163.36:11434/api/chat"
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+            
+            with urllib.request.urlopen(req) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                self.analysis = result.get("response", None)
+        
+        except Exception as e:
+            log.exception(f"Error during analysis: {e}")
+            self.analysis = None
+        
+    
 
 @log.catch
 class PageScanner:
